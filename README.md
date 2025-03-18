@@ -22,12 +22,13 @@ Clone o repositório e compile:
 git clone https://github.com/raotelecom/xva2qcow2.git
 cd xva2qcow2
 go build -o xva2qcow2 xva2qcow2.go
-
+```
 
 ## Exemplo de uso
 
 ```bash
 ./xva2qcow2 -x <arquivo.xva> -o <saida.qcow2> [-r <refDir ou prefixo>]
+```
 
 ## Contato
 Ricardo Oliveira
