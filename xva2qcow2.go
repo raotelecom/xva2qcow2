@@ -57,7 +57,7 @@ func extractXVA(xvaPath, destDir string) error {
 	return nil
 }
 
-// joinBlocks concatena os arquivos numéricos do diretório refDir e gera o arquivo raw.
+// joinBlocks concatena os arquivos numéricos do diretório refDir e gera um arquivo raw.
 func joinBlocks(refDir, rawOutput string) error {
 	files, err := ioutil.ReadDir(refDir)
 	if err != nil {
@@ -116,7 +116,7 @@ func joinBlocks(refDir, rawOutput string) error {
 			}
 			in.Close()
 		} else {
-			// Se o arquivo não existir, avança o ponteiro do arquivo.
+			// Avança o ponteiro se o arquivo não existir
 			if _, err := out.Seek(blockSize, io.SeekCurrent); err != nil {
 				return err
 			}
@@ -129,38 +129,36 @@ func joinBlocks(refDir, rawOutput string) error {
 	return nil
 }
 
-// autoDetectRefDir procura por um subdiretório cujo nome comece com o prefixo fornecido.
-func autoDetectRefDir(baseDir, prefix string) string {
+// autoDetectRefDirs retorna uma lista de subdiretórios dentro de baseDir cujo nome comece com o prefixo.
+func autoDetectRefDirs(baseDir, prefix string) ([]string, error) {
 	entries, err := ioutil.ReadDir(baseDir)
 	if err != nil {
-		return ""
+		return nil, err
 	}
+	var dirs []string
 	for _, entry := range entries {
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			return filepath.Join(baseDir, entry.Name())
+			dirs = append(dirs, filepath.Join(baseDir, entry.Name()))
 		}
 	}
-	return ""
+	return dirs, nil
 }
 
 func main() {
 	xvaPath := flag.String("x", "", "Caminho para o arquivo XVA de entrada")
-	outputPath := flag.String("o", "", "Caminho para o arquivo qcow2 de saída")
-	refDirName := flag.String("r", "", "Nome (ou prefixo) do diretório com os blocos extraídos (padrão: auto-detecta diretório que comece com 'Ref:')")
+	outputPath := flag.String("o", "", "Prefixo para o arquivo qcow2 de saída")
+	refDirPrefix := flag.String("r", "Ref:", "Prefixo dos diretórios com os blocos extraídos (padrão: 'Ref:')")
 	flag.Parse()
 
 	if *xvaPath == "" || *outputPath == "" {
-		fmt.Println("Uso: xva2qcow2 -x <arquivo.xva> -o <saida.qcow2> [-r <refDir ou prefixo>]")
+		fmt.Println("Uso: xva2qcow2 -x <arquivo.xva> -o <saida> [-r <refDir prefixo>]")
 		os.Exit(1)
 	}
 
-	// Verifica se a extensão de saída é .qcow2, caso contrário substitui a existente
-	if strings.ToLower(filepath.Ext(*outputPath)) != ".qcow2" {
-		base := strings.TrimSuffix(*outputPath, filepath.Ext(*outputPath))
-		*outputPath = base + ".qcow2"
-	}
+	// O argumento -o é tratado como prefixo; removemos a extensão, se houver.
+	baseOutput := strings.TrimSuffix(*outputPath, ".qcow2")
 
-	// Define o diretório onde o XVA está localizado e cria uma pasta de extração nesse mesmo local.
+	// Determina o diretório do XVA e cria o diretório de extração.
 	xvaAbs, err := filepath.Abs(*xvaPath)
 	if err != nil {
 		fmt.Println("Erro ao obter caminho absoluto do XVA:", err)
@@ -170,7 +168,7 @@ func main() {
 	baseName := filepath.Base(*xvaPath)
 	extExtractionDir := filepath.Join(xvaDir, baseName+"_extracted")
 
-	// Remove o diretório de extração se já existir para garantir uma extração limpa.
+	// Remove e recria o diretório de extração para garantir uma extração limpa.
 	os.RemoveAll(extExtractionDir)
 	if err := os.MkdirAll(extExtractionDir, 0755); err != nil {
 		fmt.Println("Erro ao criar diretório de extração:", err)
@@ -183,49 +181,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determina o diretório com os blocos.
-	var refDir string
-	if *refDirName != "" {
-		prefix := *refDirName
-		if !strings.Contains(prefix, ":") {
-			prefix = "Ref:"
+	// Detecta diretórios de blocos com prefixo "Ref:".
+	diskDirs, err := autoDetectRefDirs(extExtractionDir, *refDirPrefix)
+	if err != nil {
+		fmt.Println("Erro ao detectar diretórios de blocos:", err)
+		os.Exit(1)
+	}
+	// Se não encontrar nenhum, assume que há um único disco com blocos no próprio extExtractionDir.
+	if len(diskDirs) == 0 {
+		diskDirs = []string{extExtractionDir}
+	}
+
+	// Processa cada disco encontrado.
+	for i, diskDir := range diskDirs {
+		fmt.Printf("Processando disco %d a partir de: %s\n", i, diskDir)
+		// Cria um arquivo raw temporário.
+		rawTemp := filepath.Join(xvaDir, fmt.Sprintf("%s_disk_%d.raw", strings.TrimSuffix(baseName, filepath.Ext(baseName)), i))
+		if err := joinBlocks(diskDir, rawTemp); err != nil {
+			fmt.Printf("Erro ao unir blocos do disco %d: %v\n", i, err)
+			os.Exit(1)
 		}
-		refDir = autoDetectRefDir(extExtractionDir, prefix)
-	} else {
-		// Se não for fornecido, auto-detecta o diretório que comece com "Ref:".
-		refDir = autoDetectRefDir(extExtractionDir, "Ref:")
-		if refDir == "" {
-			refDir = extExtractionDir
+		// Define o nome final do arquivo qcow2.
+		var finalOutput string
+		if len(diskDirs) > 1 {
+			finalOutput = filepath.Join(xvaDir, fmt.Sprintf("%s-disk-%d.qcow2", baseOutput, i))
+		} else {
+			finalOutput = filepath.Join(xvaDir, baseOutput+".qcow2")
 		}
-	}
-
-	if refDir == "" {
-		fmt.Println("Erro: não foi possível detectar o diretório dos blocos.")
-		os.Exit(1)
-	}
-
-	fmt.Println("Unindo blocos a partir de:", refDir)
-
-	// Cria o arquivo raw temporário na mesma pasta do XVA
-	rawTemp := filepath.Join(xvaDir, baseName+".raw")
-	if err := joinBlocks(refDir, rawTemp); err != nil {
-		fmt.Println("Erro ao unir blocos:", err)
-		os.Exit(1)
-	}
-
-	// Converte o arquivo raw para qcow2 chamando o qemu-img.
-	fmt.Println("Convertendo raw para qcow2 usando qemu-img...")
-	cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", rawTemp, *outputPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Println("Erro ao converter com qemu-img:", err)
-		os.Exit(1)
-	}
-
-	// Remove o arquivo raw temporário.
-	if err := os.Remove(rawTemp); err != nil {
-		fmt.Println("Aviso: não foi possível remover o arquivo raw temporário:", err)
+		fmt.Printf("Convertendo raw do disco %d para qcow2: %s\n", i, finalOutput)
+		// Converte o raw para qcow2 usando qemu-img com exibição de progresso.
+		cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", rawTemp, finalOutput)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("Erro ao converter o disco %d: %v\n", i, err)
+			os.Exit(1)
+		}
+		// Remove o arquivo raw temporário.
+		if err := os.Remove(rawTemp); err != nil {
+			fmt.Printf("Aviso: não foi possível remover o arquivo raw temporário do disco %d: %v\n", i, err)
+		}
 	}
 
 	// Remove o diretório de extração.
@@ -233,5 +228,5 @@ func main() {
 		fmt.Println("Aviso: não foi possível remover o diretório de extração:", err)
 	}
 
-	fmt.Println("Arquivo qcow2 gerado com sucesso:", *outputPath)
+	fmt.Println("Processo concluído com sucesso!")
 }
